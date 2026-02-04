@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>TRADES → Risk & Architecture Report (offline)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{ --border:#d0d7de; --muted:#57606a; --bg:#fff; --chip:#eef2ff; --green:#a8e6a1; --yellow:#f9f48b; --orange:#f7b267; --red:#f25f5c; }
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;line-height:1.4;margin:24px;background:var(--bg)}
+    h1,h2,h3{margin-top:1.1em}
+    .bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+    input[type=file]{padding:8px;border:1px solid var(--border);border-radius:6px}
+    button{padding:8px 12px;border:1px solid var(--border);background:#f6f8fa;border-radius:6px;cursor:pointer}
+    button:disabled{opacity:0.5;cursor:not-allowed}
+    .sidenote{color:var(--muted);font-size:13px}
+    .note{background:#fff8c5;border:1px solid #f0e6a1;padding:10px;border-radius:6px}
+    .table{border-collapse:collapse;width:100%;}
+    .table th,.table td{border:1px solid var(--border);padding:6px 8px;font-size:14px;vertical-align:top}
+    .matrix{border-collapse:collapse}
+    .matrix th,.matrix td{border:1px solid #aaa;padding:10px;text-align:left;vertical-align:top;width:160px;height:90px}
+    .badge{display:inline-block;margin:2px;padding:2px 6px;background:var(--chip);border-radius:12px}
+    ul.tree{list-style: none; padding-left: 0}
+    ul.tree ul{list-style: none; padding-left: 16px; border-left:2px solid #e5e7eb; margin-left:6px}
+    code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;font-size:12px}
+  </style>
+</head>
+<body>
+<h1>TRADES → Risk & Architecture Report</h1>
+<p class="sidenote">This single HTML file runs locally in your browser. No data leaves your machine.</p>
+<div class="bar">
+  <input id="fileInput" type="file" accept=".trades,.xml,.xmi,.txt" />
+  <button id="parseBtn" disabled>Generate report</button>
+  <button id="downloadBtn" disabled>Download this report (HTML)</button>
+  <span id="status" class="sidenote"></span>
+</div>
+<div id="report"></div>
+<script>
+(function(){
+  'use strict';
+  function $(sel, root){return (root||document).querySelector(sel)}
+  function textEsc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+  function trunc(s, n){ s = String(s||''); return s.length>n? s.slice(0,n-1)+'…' : s; }
+  var statusEl = document.getElementById('status');
+  var fileEl = document.getElementById('fileInput');
+  var parseBtn = document.getElementById('parseBtn');
+  var dlBtn = document.getElementById('downloadBtn');
+  var reportEl = document.getElementById('report');
+  var fileText = '';
+  fileEl.addEventListener('change', function(){
+    var f = fileEl.files && fileEl.files[0];
+    if(!f){ statusEl.textContent=''; parseBtn.disabled=true; return; }
+    var reader = new FileReader();
+    reader.onload = function(e){ fileText = String(e.target.result||''); statusEl.textContent = f.name + ' loaded (' + f.size + ' bytes)'; parseBtn.disabled = false; };
+    reader.onerror = function(){ statusEl.textContent = 'Failed to read file'; parseBtn.disabled=true; };
+    reader.readAsText(f);
+  });
+  dlBtn.addEventListener('click', function(){
+    var html = '<!DOCTYPE html>' + document.documentElement.outerHTML;
+    var blob = new Blob([html], {type:'text/html'});
+    var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'trades_report.html'; a.click(); URL.revokeObjectURL(a.href);
+  });
+  parseBtn.addEventListener('click', function(){ if(!fileText){return} try{ generateReport(fileText); dlBtn.disabled=false; }catch(err){ console.error(err); alert('Parse error: ' + err.message); }});
+
+  function localName(node){ if(!node || !node.tagName) return ''; var t=node.tagName; var i=t.indexOf(':'); return i>=0? t.slice(i+1): t; }
+  function parseXML(text){ var clean=String(text||'').replace(/^[\uFEFF\u200B]+/, ''); var dom=new DOMParser().parseFromString(clean, 'application/xml'); var err=dom.querySelector('parsererror'); if(err) throw new Error('XML parser error: ' + err.textContent.replace(/\s+/g,' ').slice(0,200)); return dom; }
+
+  function buildEmfPathMap(root){
+    var map = new Map();
+    function walk(node, stack){
+      var childGroups = Object.create(null);
+      for(var i=0;i<node.children.length;i++){
+        var ch = node.children[i];
+        var feat = localName(ch);
+        var idx = (childGroups[feat]||0); childGroups[feat]=idx+1;
+        var seg = '@' + feat + '.' + idx;
+        var cur = stack.concat([seg]);
+        var key = '//' + cur.join('/');
+        var nm = ch.getAttribute('name') || '';
+        map.set(key, {name:nm, tag: feat, el: ch});
+        walk(ch, cur);
+      }
+    }
+    walk(root.documentElement, []);
+    return map;
+  }
+  function num(v){ var n = Number(v); return isFinite(n) ? n : null; }
+  function parseIndexFromRef(ref, feature){ if(!ref) return null; var pos = ref.indexOf(feature + '.'); if(pos < 0) return null; var tail = ref.slice(pos + feature.length + 1); var m = /^(\d+)/.exec(tail); return m? Number(m[1]) : null; }
+  function getFirstText(el, tagNames){
+    for(var i=0;i<tagNames.length;i++){
+      var t = tagNames[i];
+      var found = el.getElementsByTagName(t);
+      if(found && found.length){ var n = found[0]; var txt = n.getAttribute('name') || n.textContent; if(txt) return txt; }
+    }
+    return '';
+  }
+  // Resolve data refs list
+  function resolveDataRefList(value, emf){
+    if(!value) return {names: '', raw: ''};
+    var tokens = String(value).split(/[\s,;]+/).filter(Boolean);
+    var names = [];
+    for(var i=0;i<tokens.length;i++){
+      var tok = tokens[i];
+      var entry = emf.get(tok);
+      if(entry && entry.name){ names.push(entry.name); continue; }
+      var h = tok.indexOf('#');
+      if(h>=0){ var tail = tok.slice(h+1); var e2 = emf.get(tail); if(e2 && e2.name){ names.push(e2.name); continue; } }
+      if(tok.indexOf('/@')<0){ names.push(tok); continue; }
+      var m = /@([^\/]+)\.(\d+)$/.exec(tok);
+      if(m){ for (var it of emf.keys()){ if(it.endsWith('@'+m[1]+'.'+m[2])){ var ent = emf.get(it); names.push(ent && ent.name ? ent.name : tok); break; } } continue; }
+      names.push(tok);
+    }
+    var seen = Object.create(null); var out=[];
+    for(var j=0;j<names.length;j++){ var nm = names[j]; var key = nm.toLowerCase(); if(!seen[key]){ seen[key]=1; out.push(nm); } }
+    return {names: out.join(', '), raw: value};
+  }
+
+  function extract(root){
+    var emf = buildEmfPathMap(root);
+    var byPath = function(ref){ var e = ref && emf.get(ref); return e ? (e.name || ref) : (ref || ''); };
+
+    // Scores
+    var impactScores = Array.prototype.map.call(root.getElementsByTagName('impactScores'), function(el){ return { name: el.getAttribute('name')||'', impact: num(el.getAttribute('impact')||'') }; });
+    var difficultyScores = Array.prototype.map.call(root.getElementsByTagName('difficultyScores'), function(el){ return { name: el.getAttribute('name')||'', difficulty: num(el.getAttribute('difficulty')||'') }; });
+
+    // Threats & Threat Allocations (keep original behavior including internals/externals)
+    var threatInternals = [];
+    var threatExternals = [];
+    Array.prototype.forEach.call(root.getElementsByTagName('threatOwner'), function(owner){
+      Array.prototype.forEach.call(owner.getElementsByTagName('internals'), function(intEl){ if(intEl.hasAttribute('name')) threatInternals.push(intEl.getAttribute('name')); });
+      Array.prototype.forEach.call(owner.getElementsByTagName('externals'), function(extEl){ if(extEl.hasAttribute('name')) threatExternals.push(extEl.getAttribute('name')); });
+    });
+    // duplicate loop preserved from original
+    Array.prototype.forEach.call(root.getElementsByTagName('threatOwner'), function(owner){ Array.prototype.forEach.call(owner.getElementsByTagName('internals'), function(intEl){ if(intEl.hasAttribute('name')) threatInternals.push(intEl.getAttribute('name')); }); });
+
+    var allocRows = [];
+    Array.prototype.forEach.call(root.getElementsByTagName('threatAllocations'), function(ta){
+      var thRef = ta.getAttribute('threat'); var impRef = ta.getAttribute('impactScore'); var difRef = ta.getAttribute('difficultyScore');
+      var allocName = ta.getAttribute('name') || '';
+      var thName='';
+      var thIdx=parseIndexFromRef(thRef||'', 'internals'); if(thIdx!=null && threatInternals[thIdx]) thName = threatInternals[thIdx];
+      var thEIdx=parseIndexFromRef(thRef||'', 'externals'); if(!thName && thEIdx!=null && threatExternals[thEIdx]) thName = threatExternals[thEIdx];
+      if(!thName) thName = byPath(thRef);
+      var impLevel=null,impLabel=''; var iIdx=parseIndexFromRef(impRef||'', 'impactScores'); if(iIdx!=null && impactScores[iIdx]){ impLevel=impactScores[iIdx].impact; impLabel=impactScores[iIdx].name; }
+      var difLevel=null,difLabel=''; var dIdx=parseIndexFromRef(difRef||'', 'difficultyScores'); if(dIdx!=null && difficultyScores[dIdx]){ difLevel=difficultyScores[dIdx].difficulty; difLabel=difficultyScores[dIdx].name; }
+      var compNode = ta.parentElement; var compName = '';
+      while(compNode && localName(compNode) !== 'components') compNode = compNode.parentElement;
+      if(compNode) compName = compNode.getAttribute('name') || '';
+      var newLabel = (allocName || (thName || '(allocation)')) + ' on ' + (compName || '(unknown)');
+      allocRows.push({ allocName: allocName || (thName || '(allocation)'), threat: thName || '(unknown threat)', compName: compName, displayName: newLabel, impact: impLevel, impactLabel: impLabel, difficulty: difLevel, difficultyLabel: difLabel });
+    });
+
+    // Components & controls
+    function buildTreeAndControls(node){
+      var out=[];
+      for(var i=0;i<node.children.length;i++){
+        var ch=node.children[i]; var ln=localName(ch);
+        if(ln==='components'){
+          var name=ch.getAttribute('name')||'(unnamed)';
+          var compControls=[];
+          for(var j=0;j<ch.children.length;j++){
+            var sub=ch.children[j]; if(localName(sub)!=='controlOwner') continue;
+            for(var k=0;k<sub.children.length;k++){
+              var ctrl=sub.children[k]; var tag=localName(ctrl);
+              if(tag!=='internals' && tag!=='externals') continue;
+              var kind = (tag==='externals') ? 'external' : 'internal';
+              var ctrlName = ctrl.getAttribute('name')||''; if(!ctrlName) continue;
+              var item={
+                id: ctrl.getAttribute('id')||ctrl.getAttribute('uid')||ctrl.getAttribute('xmi:id')||'',
+                name: ctrlName,
+                description: ctrl.getAttribute('description') || ctrl.getAttribute('desc') || ctrl.getAttribute('tooltipText') || getFirstText(ctrl, ['description','comment','notes','text','doc','documentation']) || '',
+                kind: kind,
+                source: ctrl.getAttribute('source')||'',
+                link: ctrl.getAttribute('link')||'',
+                sourceID: ctrl.getAttribute('sourceID')||'',
+                rawTag: tag,
+                component: name,
+                characteristics: Array.prototype.map.call(ctrl.getElementsByTagName('characteristics'), function(c){ return {name:c.getAttribute('name')||'', label:c.getAttribute('label')||'', value:c.getAttribute('value')||''}; })
+              };
+              compControls.push(item);
+            }
+          }
+          var children = buildTreeAndControls(ch);
+          out.push({ name:name, children:children, controls:compControls });
+        }
+      }
+      return out;
+    }
+    var componentRoots = buildTreeAndControls(root.documentElement);
+
+    // Flatten to catalog + allocations
+    var controlsCatalogMap = Object.create(null);
+    var controlAllocs=[];
+    function walkCompTree(n){
+      if(n.controls && n.controls.length){
+        for(var i=0;i<n.controls.length;i++){
+          var c=n.controls[i];
+          var key=(c.kind||'internal')+'\n'+(c.id||'')+'\n'+c.name.toLowerCase();
+          if(!controlsCatalogMap[key]) controlsCatalogMap[key] = {name:c.name, description:c.description, kind:c.kind, id:c.id, source:c.source, link:c.link, sourceID:c.sourceID};
+          controlAllocs.push({ control:c.name, description:c.description, kind:c.kind, where:n.name, rawTag:c.rawTag, source:c.source, link:c.link, sourceID:c.sourceID });
+        }
+      }
+      (n.children||[]).forEach(walkCompTree);
+    }
+    componentRoots.forEach(walkCompTree);
+    var controlsCatalog = Object.keys(controlsCatalogMap).map(function(k){ return controlsCatalogMap[k]; });
+
+    // Per-component rollup
+    var byComponent = {};
+    controlAllocs.forEach(function(a){ var key=a.where||'(unresolved)'; if(!byComponent[key]) byComponent[key]={ internal:[], external:[] }; byComponent[key][a.kind==='external'?'external':'internal'].push(a); });
+
+    // Data Flows (Affect Relations)
+    var affects = Array.prototype.map.call(root.getElementsByTagName('affectRelations'), function(el){
+      var raw = el.getAttribute('data')||''; var r = resolveDataRefList(raw, emf);
+      return { link: byPath(el.getAttribute('link')), target: byPath(el.getAttribute('targetComponent')), data: r.names, rawData: r.raw };
+    });
+
+    // === Eclipse-derived risk-matrix colors (from version 8) ===
+    var cellColors = {};
+    Array.prototype.forEach.call(root.getElementsByTagName('impactScores'), function(isEl){
+      var impLevel = num(isEl.getAttribute('impact'));
+      if(!impLevel) return;
+      if(!cellColors[impLevel]) cellColors[impLevel] = {};
+      Array.prototype.forEach.call(isEl.getElementsByTagName('configurations'), function(cfg){
+        var diffRef = cfg.getAttribute('difficulty')||'';
+        var dIdx = parseIndexFromRef(diffRef, 'difficultyScores');
+        if(dIdx==null) return;
+        var diffLevel = dIdx + 1; // index-based level (as in v8)
+        var col = cfg.getAttribute('color')||'';
+        var n = Number(col);
+        if(Number.isFinite(n)){
+          var css = '#' + n.toString(16).padStart(6,'0');
+          cellColors[impLevel][diffLevel] = css;
+        } else if(/^\#?[0-9a-fA-F]{6}$/.test(col)){
+          var css2 = col.startsWith('#') ? col : ('#'+col);
+          cellColors[impLevel][diffLevel] = css2;
+        }
+      });
+    });
+
+    return { impactScores:impactScores, difficultyScores:difficultyScores, allocRows:allocRows, componentRoots:componentRoots, affects:affects, controls:controlsCatalog, controlAllocs:controlAllocs, byComponent:byComponent, cellColors:cellColors };
+  }
+
+  function renderTree(nodes){ var ul=document.createElement('ul'); ul.className='tree'; nodes.forEach(function(n){ var li=document.createElement('li'); li.innerHTML='<strong>'+textEsc(n.name)+'</strong>'; if(n.controls && n.controls.length){ var sub=document.createElement('div'); sub.className='sidenote'; var badges=n.controls.map(function(c){return '<span class="badge">'+textEsc(c.name)+' ('+(c.kind||'internal')+')</span>';}).join(' '); sub.innerHTML='Controls: '+badges; li.appendChild(sub);} if(n.children && n.children.length) li.appendChild(renderTree(n.children)); ul.appendChild(li); }); return ul; }
+
+  function cellColor(i,d){ var s=(i||0)+(d||0); if(s<=3) return 'var(--green)'; if(s<=4) return 'var(--yellow)'; if(s<=5) return 'var(--orange)'; return 'var(--red)'; }
+
+  function generateReport(xmi){
+    var xml = parseXML(xmi); var data = extract(xml); var wrap = document.createElement('div');
+
+    // Summary
+    var meta=document.createElement('section'); var fname=(fileEl.files&&fileEl.files[0])?fileEl.files[0].name:''; var fsize=(fileEl.files&&fileEl.files[0])?fileEl.files[0].size:0;
+    meta.innerHTML='<h2>File Summary</h2><ul><li><strong>Name</strong>: '+textEsc(fname)+'</li><li><strong>Size</strong>: '+fsize+' bytes</li></ul><p class="note">If some sections appear empty, the XMI may not include those elements or uses a different mapping. Export the <em>.trades</em> with full semantic content.</p>';
+    wrap.appendChild(meta);
+
+    // Risks
+    var risksSec=document.createElement('section'); risksSec.innerHTML='<h2>Identified Risks (Threat Allocations)</h2>';
+    if(data.allocRows.length){ var tbl=document.createElement('table'); tbl.className='table'; tbl.innerHTML='<thead><tr><th>Threat Allocation</th><th>Impact</th><th>Feasibility</th></tr></thead>'; var tb=document.createElement('tbody'); data.allocRows.forEach(function(r){ var tr=document.createElement('tr'); tr.innerHTML='<td>'+textEsc(r.displayName)+'</td><td>'+(r.impact!=null?r.impact:'')+(r.impactLabel?' ('+textEsc(r.impactLabel)+')':'')+'</td><td>'+(r.difficulty!=null?r.difficulty:'')+(r.difficultyLabel?' ('+textEsc(r.difficultyLabel)+')':'')+'</td>'; tb.appendChild(tr); }); tbl.appendChild(tb); risksSec.appendChild(tbl);} else { risksSec.innerHTML+='<p>No threat allocations found.</p>'; }
+    wrap.appendChild(risksSec);
+
+    // Impact Items
+    var impSec=document.createElement('section'); impSec.innerHTML='<h2>Impact Items</h2>';
+    if(data.impactScores.length){ var it=document.createElement('table'); it.className='table'; it.innerHTML='<thead><tr><th>Level</th><th>Description</th></tr></thead>'; var ib=document.createElement('tbody'); data.impactScores.forEach(function(s){ var tr=document.createElement('tr'); tr.innerHTML='<td>'+(s.impact!=null?s.impact:'')+'</td><td>'+textEsc(s.name)+'</td>'; ib.appendChild(tr); }); it.appendChild(ib); impSec.appendChild(it);} else { impSec.innerHTML+='<p>None found.</p>'; }
+    wrap.appendChild(impSec);
+
+    // ====== Variable-sized Risk Matrix (N x M) ======
+    var matSec=document.createElement('section'); matSec.innerHTML='<h2>Risk Matrix (Impact vs Feasibility)</h2>'; var mat=document.createElement('table'); mat.className='matrix';
+
+    var maxI = 0; for(var u=0; u<data.impactScores.length; u++){ var v = Math.round(data.impactScores[u].impact||0); if(v>maxI) maxI=v; }
+    if(maxI<=0) maxI = 3; // safe fallback
+    var maxD = data.difficultyScores.length || 3;
+
+    function labelForImpact(i){ for(var x=0;x<data.impactScores.length;x++){ var s=data.impactScores[x]; if(Math.round(s.impact||0)===i) return s.name||String(i); } return String(i); }
+    function labelForDiff(d){ var s=data.difficultyScores[d-1]; return s? (s.name||String(d)) : String(d); }
+
+    var head=document.createElement('thead'); var trh=document.createElement('tr'); trh.innerHTML='<th></th>';
+    for(var d=1; d<=maxD; d++){ trh.innerHTML+='<th>Feasibility '+d+' ('+textEsc(labelForDiff(d))+')</th>'; }
+    head.appendChild(trh); mat.appendChild(head);
+
+    var body=document.createElement('tbody'); var buckets=Object.create(null);
+    data.allocRows.forEach(function(r){
+      var i=Math.max(1,Math.min(maxI,Math.round(r.impact||0)));
+      var d=Math.max(1,Math.min(maxD,Math.round(r.difficulty||0)));
+      var key=i+','+d; (buckets[key]||(buckets[key]=[])).push(r.displayName);
+    });
+
+    for(var i=1;i<=maxI;i++){
+      var tr=document.createElement('tr'); tr.innerHTML='<th>Impact '+i+' ('+textEsc(labelForImpact(i))+')</th>';
+      for(var d=1; d<=maxD; d++){
+        var key=i+','+d; var names=buckets[key]||[]; var chips=names.map(function(n){return '<span class="badge">'+textEsc(n)+'</span>';}).join('');
+        var td=document.createElement('td'); td.style.background = (data.cellColors && data.cellColors[i] && data.cellColors[i][d]) ? data.cellColors[i][d] : cellColor(i,d); td.innerHTML=chips; tr.appendChild(td);
+      }
+      body.appendChild(tr);
+    }
+    mat.appendChild(body); matSec.appendChild(mat);
+    matSec.innerHTML+='<p class="sidenote">Matrix size adapts to your scoring system: Impact levels 1…'+maxI+' × Feasibility levels 1…'+maxD+'. Model-defined colors override the fallback gradient.</p>';
+    wrap.appendChild(matSec);
+
+    // System Architecture
+    var archSec=document.createElement('section'); archSec.innerHTML='<h2>System Architecture</h2>'; if(data.componentRoots.length){ archSec.appendChild(renderTree(data.componentRoots)); } else { archSec.innerHTML+='<p>No components found.</p>'; } wrap.appendChild(archSec);
+
+    // Data Flows
+    if(data.affects.length){ var at=document.createElement('section'); at.innerHTML='<h2>Data Flows</h2>'; var tbl2=document.createElement('table'); tbl2.className='table'; tbl2.innerHTML='<thead><tr><th>Link</th><th>Target Component</th><th>Data Refs</th></tr></thead>'; var ab=document.createElement('tbody'); data.affects.forEach(function(a){ var tr=document.createElement('tr'); var cell = '<td>'+textEsc(a.data); if(a.rawData && a.rawData!==a.data){ cell += ' <span class="sidenote">('+textEsc(a.rawData)+')</span>'; } cell += '</td>'; tr.innerHTML='<td>'+textEsc(a.link)+'</td><td>'+textEsc(a.target)+'</td>'+cell; ab.appendChild(tr); }); tbl2.appendChild(ab); at.appendChild(tbl2); wrap.appendChild(at); }
+
+    // Security Controls
+    var scSec=document.createElement('section'); scSec.innerHTML='<h2>Allocated Security Controls</h2>';
+    if(data.controls.length){ var ct=document.createElement('table'); ct.className='table'; ct.innerHTML='<thead><tr><th>Control</th><th>Kind</th><th>ID</th><th>Source</th><th>Description</th></tr></thead>'; var cb=document.createElement('tbody'); data.controls.forEach(function(c){ var tr=document.createElement('tr'); tr.innerHTML='<td>'+textEsc(c.name)+'</td><td>'+(c.kind||'internal')+'</td><td>'+textEsc(c.id||'')+'</td><td>'+textEsc(c.source||'')+'</td><td>'+textEsc(c.description||'')+'</td>'; cb.appendChild(tr); }); ct.appendChild(cb); scSec.appendChild(document.createElement('h3')).textContent='Catalog'; scSec.appendChild(ct);} else { scSec.innerHTML+='<p>No controls catalog found (internal/external).</p>'; }
+    if(data.controlAllocs.length){ var at2=document.createElement('table'); at2.className='table'; at2.innerHTML='<thead><tr><th>Control</th><th>Kind</th><th>Description</th><th>Allocated To (Component)</th><th>Source (Tag)</th><th>Catalog</th></tr></thead>'; var ab2=document.createElement('tbody'); data.controlAllocs.forEach(function(a){ var link = a.link? '<a href="'+textEsc(a.link)+'" target="_blank" rel="noopener">link</a>' : ''; var tr=document.createElement('tr'); tr.innerHTML='<td>'+textEsc(a.control)+'</td><td>'+textEsc(a.kind||'internal')+'</td><td>'+textEsc(trunc(a.description,160))+'</td><td>'+textEsc(a.where||'')+'</td><td class="sidenote">'+textEsc(a.rawTag)+'</td><td>'+link+'</td>'; ab2.appendChild(tr); }); at2.appendChild(ab2); scSec.appendChild(document.createElement('h3')).textContent='Allocations'; scSec.appendChild(at2);
+      var pc=document.createElement('table'); pc.className='table'; pc.innerHTML='<thead><tr><th>Component</th><th>Internal Controls</th><th>External Controls</th></tr></thead>'; var pcb=document.createElement('tbody'); Object.keys(data.byComponent).sort().forEach(function(comp){ var row=data.byComponent[comp]; var iList=(row.internal||[]).map(function(a){return '<span class="badge">'+textEsc(a.control)+'</span>';}).join(''); var eList=(row.external||[]).map(function(a){return '<span class="badge">'+textEsc(a.control)+'</span>';}).join(''); var tr=document.createElement('tr'); tr.innerHTML='<td>'+textEsc(comp)+'</td><td>'+iList+'</td><td>'+eList+'</td>'; pcb.appendChild(tr); }); pc.appendChild(pcb); scSec.appendChild(document.createElement('h3')).textContent='By Component'; scSec.appendChild(pc);
+    } else { scSec.innerHTML+='<p>No control allocations detected under components. Confirm controls are placed under <code><controlOwner></code> using <code><internals></code> or <code><externals></code>.</p>'; }
+    wrap.appendChild(scSec);
+
+    reportEl.innerHTML=''; reportEl.appendChild(wrap);
+  }
+})();
+</script>
+</body>
+</html>
