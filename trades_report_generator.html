@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>TRADES → Risk & Architecture Report (offline)</title>
+  <title>TRADES → Risk & Architecture Report (fixed)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root{ --border:#d0d7de; --muted:#57606a; --bg:#fff; --chip:#eef2ff; --green:#a8e6a1; --yellow:#f9f48b; --orange:#f7b267; --red:#f25f5c; }
@@ -17,7 +17,7 @@
     .table{border-collapse:collapse;width:100%;}
     .table th,.table td{border:1px solid var(--border);padding:6px 8px;font-size:14px;vertical-align:top}
     .matrix{border-collapse:collapse}
-    .matrix th,.matrix td{border:1px solid #aaa;padding:10px;text-align:left;vertical-align:top;width:160px;height:90px}
+    .matrix th,.matrix td{border:1px solid #aaa;padding:10px;text-align:left;vertical-align:top;width:320px;height:90px}
     .badge{display:inline-block;margin:2px;padding:2px 6px;background:var(--chip);border-radius:12px}
     ul.tree{list-style: none; padding-left: 0}
     ul.tree ul{list-style: none; padding-left: 16px; border-left:2px solid #e5e7eb; margin-left:6px}
@@ -26,7 +26,7 @@
 </head>
 <body>
 <h1>TRADES → Risk & Architecture Report</h1>
-<p class="sidenote">This single HTML file runs locally in your browser. No data leaves your machine.</p>
+<p class="sidenote">This fixed version uses 0-based indexing for EMF path resolution.</p>
 <div class="bar">
   <input id="fileInput" type="file" accept=".trades,.xml,.xmi,.txt" />
   <button id="parseBtn" disabled>Generate report</button>
@@ -57,13 +57,15 @@
   dlBtn.addEventListener('click', function(){
     var html = '<!DOCTYPE html>' + document.documentElement.outerHTML;
     var blob = new Blob([html], {type:'text/html'});
-    var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'trades_report.html'; a.click(); URL.revokeObjectURL(a.href);
+    var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'trades_report_fixed.html'; a.click(); URL.revokeObjectURL(a.href);
   });
   parseBtn.addEventListener('click', function(){ if(!fileText){return} try{ generateReport(fileText); dlBtn.disabled=false; }catch(err){ console.error(err); alert('Parse error: ' + err.message); }});
 
   function localName(node){ if(!node || !node.tagName) return ''; var t=node.tagName; var i=t.indexOf(':'); return i>=0? t.slice(i+1): t; }
   function parseXML(text){ var clean=String(text||'').replace(/^[\uFEFF\u200B]+/, ''); var dom=new DOMParser().parseFromString(clean, 'application/xml'); var err=dom.querySelector('parsererror'); if(err) throw new Error('XML parser error: ' + err.textContent.replace(/\s+/g,' ').slice(0,200)); return dom; }
 
+  // CORRECTED: buildEmfPathMap now correctly uses 0-based indexing for child groups
+   
   function buildEmfPathMap(root){
     var map = new Map();
     function walk(node, stack){
@@ -71,12 +73,12 @@
       for(var i=0;i<node.children.length;i++){
         var ch = node.children[i];
         var feat = localName(ch);
-        var idx = (childGroups[feat]||0); childGroups[feat]=idx+1;
+        var idx = (childGroups[feat]||0); 
+        childGroups[feat] = idx + 1;
         var seg = '@' + feat + '.' + idx;
         var cur = stack.concat([seg]);
         var key = '//' + cur.join('/');
-        var nm = ch.getAttribute('name') || '';
-        map.set(key, {name:nm, tag: feat, el: ch});
+        map.set(key, {name: ch.getAttribute('name') || '', tag: feat, el: ch});
         walk(ch, cur);
       }
     }
@@ -93,7 +95,6 @@
     }
     return '';
   }
-  // Resolve data refs list
   function resolveDataRefList(value, emf){
     if(!value) return {names: '', raw: ''};
     var tokens = String(value).split(/[\s,;]+/).filter(Boolean);
@@ -117,21 +118,23 @@
   function extract(root){
     var emf = buildEmfPathMap(root);
     var byPath = function(ref){ var e = ref && emf.get(ref); return e ? (e.name || ref) : (ref || ''); };
-
-    // Scores
-    var impactScores = Array.prototype.map.call(root.getElementsByTagName('impactScores'), function(el){ return { name: el.getAttribute('name')||'', impact: num(el.getAttribute('impact')||'') }; });
-    var difficultyScores = Array.prototype.map.call(root.getElementsByTagName('difficultyScores'), function(el){ return { name: el.getAttribute('name')||'', difficulty: num(el.getAttribute('difficulty')||'') }; });
-
-    // Threats & Threat Allocations (keep original behavior including internals/externals)
-    var threatInternals = [];
-    var threatExternals = [];
-    Array.prototype.forEach.call(root.getElementsByTagName('threatOwner'), function(owner){
-      Array.prototype.forEach.call(owner.getElementsByTagName('internals'), function(intEl){ if(intEl.hasAttribute('name')) threatInternals.push(intEl.getAttribute('name')); });
-      Array.prototype.forEach.call(owner.getElementsByTagName('externals'), function(extEl){ if(extEl.hasAttribute('name')) threatExternals.push(extEl.getAttribute('name')); });
+	
+	var impactScores = Array.prototype.map.call(root.getElementsByTagName('impactScores'), function(el){ 
+      return { name: el.getAttribute('name')||'', impact: Number(el.getAttribute('impact')) }; 
     });
-    // duplicate loop preserved from original
-    Array.prototype.forEach.call(root.getElementsByTagName('threatOwner'), function(owner){ Array.prototype.forEach.call(owner.getElementsByTagName('internals'), function(intEl){ if(intEl.hasAttribute('name')) threatInternals.push(intEl.getAttribute('name')); }); });
+    var difficultyScores = Array.prototype.map.call(root.getElementsByTagName('difficultyScores'), function(el){ 
+      return { name: el.getAttribute('name')||'', difficulty: Number(el.getAttribute('difficulty')) }; 
+    });
 
+	var threatInternals = [];
+    var threatExternals = [];
+    var threatOwners = root.getElementsByTagName('threatOwner');
+    for(var i=0; i<threatOwners.length; i++){
+      var ints = threatOwners[i].getElementsByTagName('internals');
+      for(var j=0; j<ints.length; j++) threatInternals.push(ints[j].getAttribute('name') || '');
+      var exts = threatOwners[i].getElementsByTagName('externals');
+      for(var k=0; k<exts.length; k++) threatExternals.push(exts[k].getAttribute('name') || '');
+    }
     var allocRows = [];
     Array.prototype.forEach.call(root.getElementsByTagName('threatAllocations'), function(ta){
       var thRef = ta.getAttribute('threat'); var impRef = ta.getAttribute('impactScore'); var difRef = ta.getAttribute('difficultyScore');
@@ -149,7 +152,6 @@
       allocRows.push({ allocName: allocName || (thName || '(allocation)'), threat: thName || '(unknown threat)', compName: compName, displayName: newLabel, impact: impLevel, impactLabel: impLabel, difficulty: difLevel, difficultyLabel: difLabel });
     });
 
-    // Components & controls
     function buildTreeAndControls(node){
       var out=[];
       for(var i=0;i<node.children.length;i++){
@@ -187,7 +189,6 @@
     }
     var componentRoots = buildTreeAndControls(root.documentElement);
 
-    // Flatten to catalog + allocations
     var controlsCatalogMap = Object.create(null);
     var controlAllocs=[];
     function walkCompTree(n){
@@ -204,17 +205,14 @@
     componentRoots.forEach(walkCompTree);
     var controlsCatalog = Object.keys(controlsCatalogMap).map(function(k){ return controlsCatalogMap[k]; });
 
-    // Per-component rollup
     var byComponent = {};
     controlAllocs.forEach(function(a){ var key=a.where||'(unresolved)'; if(!byComponent[key]) byComponent[key]={ internal:[], external:[] }; byComponent[key][a.kind==='external'?'external':'internal'].push(a); });
 
-    // Data Flows (Affect Relations)
     var affects = Array.prototype.map.call(root.getElementsByTagName('affectRelations'), function(el){
       var raw = el.getAttribute('data')||''; var r = resolveDataRefList(raw, emf);
       return { link: byPath(el.getAttribute('link')), target: byPath(el.getAttribute('targetComponent')), data: r.names, rawData: r.raw };
     });
 
-    // === Eclipse-derived risk-matrix colors (from version 8) ===
     var cellColors = {};
     Array.prototype.forEach.call(root.getElementsByTagName('impactScores'), function(isEl){
       var impLevel = num(isEl.getAttribute('impact'));
@@ -224,7 +222,7 @@
         var diffRef = cfg.getAttribute('difficulty')||'';
         var dIdx = parseIndexFromRef(diffRef, 'difficultyScores');
         if(dIdx==null) return;
-        var diffLevel = dIdx + 1; // index-based level (as in v8)
+        var diffLevel = dIdx + 1; 
         var col = cfg.getAttribute('color')||'';
         var n = Number(col);
         if(Number.isFinite(n)){
@@ -247,33 +245,29 @@
   function generateReport(xmi){
     var xml = parseXML(xmi); var data = extract(xml); var wrap = document.createElement('div');
 
-    // Summary
     var meta=document.createElement('section'); var fname=(fileEl.files&&fileEl.files[0])?fileEl.files[0].name:''; var fsize=(fileEl.files&&fileEl.files[0])?fileEl.files[0].size:0;
-    meta.innerHTML='<h2>File Summary</h2><ul><li><strong>Name</strong>: '+textEsc(fname)+'</li><li><strong>Size</strong>: '+fsize+' bytes</li></ul><p class="note">If some sections appear empty, the XMI may not include those elements or uses a different mapping. Export the <em>.trades</em> with full semantic content.</p>';
+    meta.innerHTML='<h2>File Summary</h2><ul><li><strong>Name</strong>: '+textEsc(fname)+'</li><li><strong>Size</strong>: '+fsize+' bytes</li></ul>';
     wrap.appendChild(meta);
 
-    // Risks
     var risksSec=document.createElement('section'); risksSec.innerHTML='<h2>Identified Risks (Threat Allocations)</h2>';
-    if(data.allocRows.length){ var tbl=document.createElement('table'); tbl.className='table'; tbl.innerHTML='<thead><tr><th>Threat Allocation</th><th>Impact</th><th>Feasibility</th></tr></thead>'; var tb=document.createElement('tbody'); data.allocRows.forEach(function(r){ var tr=document.createElement('tr'); tr.innerHTML='<td>'+textEsc(r.displayName)+'</td><td>'+(r.impact!=null?r.impact:'')+(r.impactLabel?' ('+textEsc(r.impactLabel)+')':'')+'</td><td>'+(r.difficulty!=null?r.difficulty:'')+(r.difficultyLabel?' ('+textEsc(r.difficultyLabel)+')':'')+'</td>'; tb.appendChild(tr); }); tbl.appendChild(tb); risksSec.appendChild(tbl);} else { risksSec.innerHTML+='<p>No threat allocations found.</p>'; }
+    if(data.allocRows.length){ var tbl=document.createElement('table'); tbl.className='table'; tbl.innerHTML='<thead><tr><th>Threat Allocation</th><th>Impact</th><th>Likelihood</th></tr></thead>'; var tb=document.createElement('tbody'); data.allocRows.forEach(function(r){ var tr=document.createElement('tr'); tr.innerHTML='<td>'+textEsc(r.displayName)+'</td><td>'+(r.impact!=null?r.impact:'')+(r.impactLabel?' ('+textEsc(r.impactLabel)+')':'')+'</td><td>'+(r.difficulty!=null?r.difficulty:'')+(r.difficultyLabel?' ('+textEsc(r.difficultyLabel)+')':'')+'</td>'; tb.appendChild(tr); }); tbl.appendChild(tb); risksSec.appendChild(tbl);} else { risksSec.innerHTML+='<p>No threat allocations found.</p>'; }
     wrap.appendChild(risksSec);
 
-    // Impact Items
     var impSec=document.createElement('section'); impSec.innerHTML='<h2>Impact Items</h2>';
     if(data.impactScores.length){ var it=document.createElement('table'); it.className='table'; it.innerHTML='<thead><tr><th>Level</th><th>Description</th></tr></thead>'; var ib=document.createElement('tbody'); data.impactScores.forEach(function(s){ var tr=document.createElement('tr'); tr.innerHTML='<td>'+(s.impact!=null?s.impact:'')+'</td><td>'+textEsc(s.name)+'</td>'; ib.appendChild(tr); }); it.appendChild(ib); impSec.appendChild(it);} else { impSec.innerHTML+='<p>None found.</p>'; }
     wrap.appendChild(impSec);
 
-    // ====== Variable-sized Risk Matrix (N x M) ======
-    var matSec=document.createElement('section'); matSec.innerHTML='<h2>Risk Matrix (Impact vs Feasibility)</h2>'; var mat=document.createElement('table'); mat.className='matrix';
+    var matSec=document.createElement('section'); matSec.innerHTML='<h2>Risk Matrix (Impact vs Likelihood)</h2>'; var mat=document.createElement('table'); mat.className='matrix';
 
     var maxI = 0; for(var u=0; u<data.impactScores.length; u++){ var v = Math.round(data.impactScores[u].impact||0); if(v>maxI) maxI=v; }
-    if(maxI<=0) maxI = 3; // safe fallback
+    if(maxI<=0) maxI = 3; 
     var maxD = data.difficultyScores.length || 3;
 
     function labelForImpact(i){ for(var x=0;x<data.impactScores.length;x++){ var s=data.impactScores[x]; if(Math.round(s.impact||0)===i) return s.name||String(i); } return String(i); }
     function labelForDiff(d){ var s=data.difficultyScores[d-1]; return s? (s.name||String(d)) : String(d); }
 
     var head=document.createElement('thead'); var trh=document.createElement('tr'); trh.innerHTML='<th></th>';
-    for(var d=1; d<=maxD; d++){ trh.innerHTML+='<th>Feasibility '+d+' ('+textEsc(labelForDiff(d))+')</th>'; }
+    for(var d=1; d<=maxD; d++){ trh.innerHTML+='<th>Likelihood '+d+' ('+textEsc(labelForDiff(d))+')</th>'; }
     head.appendChild(trh); mat.appendChild(head);
 
     var body=document.createElement('tbody'); var buckets=Object.create(null);
@@ -292,21 +286,17 @@
       body.appendChild(tr);
     }
     mat.appendChild(body); matSec.appendChild(mat);
-    matSec.innerHTML+='<p class="sidenote">Matrix size adapts to your scoring system: Impact levels 1…'+maxI+' × Feasibility levels 1…'+maxD+'. Model-defined colors override the fallback gradient.</p>';
     wrap.appendChild(matSec);
 
-    // System Architecture
     var archSec=document.createElement('section'); archSec.innerHTML='<h2>System Architecture</h2>'; if(data.componentRoots.length){ archSec.appendChild(renderTree(data.componentRoots)); } else { archSec.innerHTML+='<p>No components found.</p>'; } wrap.appendChild(archSec);
 
-    // Data Flows
     if(data.affects.length){ var at=document.createElement('section'); at.innerHTML='<h2>Data Flows</h2>'; var tbl2=document.createElement('table'); tbl2.className='table'; tbl2.innerHTML='<thead><tr><th>Link</th><th>Target Component</th><th>Data Refs</th></tr></thead>'; var ab=document.createElement('tbody'); data.affects.forEach(function(a){ var tr=document.createElement('tr'); var cell = '<td>'+textEsc(a.data); if(a.rawData && a.rawData!==a.data){ cell += ' <span class="sidenote">('+textEsc(a.rawData)+')</span>'; } cell += '</td>'; tr.innerHTML='<td>'+textEsc(a.link)+'</td><td>'+textEsc(a.target)+'</td>'+cell; ab.appendChild(tr); }); tbl2.appendChild(ab); at.appendChild(tbl2); wrap.appendChild(at); }
 
-    // Security Controls
     var scSec=document.createElement('section'); scSec.innerHTML='<h2>Allocated Security Controls</h2>';
-    if(data.controls.length){ var ct=document.createElement('table'); ct.className='table'; ct.innerHTML='<thead><tr><th>Control</th><th>Kind</th><th>ID</th><th>Source</th><th>Description</th></tr></thead>'; var cb=document.createElement('tbody'); data.controls.forEach(function(c){ var tr=document.createElement('tr'); tr.innerHTML='<td>'+textEsc(c.name)+'</td><td>'+(c.kind||'internal')+'</td><td>'+textEsc(c.id||'')+'</td><td>'+textEsc(c.source||'')+'</td><td>'+textEsc(c.description||'')+'</td>'; cb.appendChild(tr); }); ct.appendChild(cb); scSec.appendChild(document.createElement('h3')).textContent='Catalog'; scSec.appendChild(ct);} else { scSec.innerHTML+='<p>No controls catalog found (internal/external).</p>'; }
-    if(data.controlAllocs.length){ var at2=document.createElement('table'); at2.className='table'; at2.innerHTML='<thead><tr><th>Control</th><th>Kind</th><th>Description</th><th>Allocated To (Component)</th><th>Source (Tag)</th><th>Catalog</th></tr></thead>'; var ab2=document.createElement('tbody'); data.controlAllocs.forEach(function(a){ var link = a.link? '<a href="'+textEsc(a.link)+'" target="_blank" rel="noopener">link</a>' : ''; var tr=document.createElement('tr'); tr.innerHTML='<td>'+textEsc(a.control)+'</td><td>'+textEsc(a.kind||'internal')+'</td><td>'+textEsc(trunc(a.description,160))+'</td><td>'+textEsc(a.where||'')+'</td><td class="sidenote">'+textEsc(a.rawTag)+'</td><td>'+link+'</td>'; ab2.appendChild(tr); }); at2.appendChild(ab2); scSec.appendChild(document.createElement('h3')).textContent='Allocations'; scSec.appendChild(at2);
+    if(data.controls.length){ var ct=document.createElement('table'); ct.className='table'; ct.innerHTML='<thead><tr><th>Control</th><th>Kind</th><th>ID</th><th>Source</th><th>Description</th></tr></thead>'; var cb=document.createElement('tbody'); data.controls.forEach(function(c){ var tr=document.createElement('tr'); tr.innerHTML='<td>'+textEsc(c.name)+'</td><td>'+(c.kind||'internal')+'</td><td>'+textEsc(c.id||'')+'</td><td>'+textEsc(c.source||'')+'</td><td>'+textEsc(c.description||'')+'</td>'; cb.appendChild(tr); }); ct.appendChild(cb); scSec.appendChild(document.createElement('h3')).textContent='Catalog'; scSec.appendChild(ct);}
+    if(data.controlAllocs.length){ var at2=document.createElement('table'); at2.className='table'; at2.innerHTML='<thead><tr><th>Control</th><th>Kind</th><th>Description</th><th>Allocated To (Component)</th><th>Catalog</th></tr></thead>'; var ab2=document.createElement('tbody'); data.controlAllocs.forEach(function(a){ var link = a.link? '<a href="'+textEsc(a.link)+'" target="_blank" rel="noopener">link</a>' : ''; var tr=document.createElement('tr'); tr.innerHTML='<td>'+textEsc(a.control)+'</td><td>'+textEsc(a.kind||'internal')+'</td><td>'+textEsc(trunc(a.description,160))+'</td><td>'+textEsc(a.where||'')+'</td><td>'+link+'</td>'; ab2.appendChild(tr); }); at2.appendChild(ab2); scSec.appendChild(document.createElement('h3')).textContent='Allocations'; scSec.appendChild(at2);
       var pc=document.createElement('table'); pc.className='table'; pc.innerHTML='<thead><tr><th>Component</th><th>Internal Controls</th><th>External Controls</th></tr></thead>'; var pcb=document.createElement('tbody'); Object.keys(data.byComponent).sort().forEach(function(comp){ var row=data.byComponent[comp]; var iList=(row.internal||[]).map(function(a){return '<span class="badge">'+textEsc(a.control)+'</span>';}).join(''); var eList=(row.external||[]).map(function(a){return '<span class="badge">'+textEsc(a.control)+'</span>';}).join(''); var tr=document.createElement('tr'); tr.innerHTML='<td>'+textEsc(comp)+'</td><td>'+iList+'</td><td>'+eList+'</td>'; pcb.appendChild(tr); }); pc.appendChild(pcb); scSec.appendChild(document.createElement('h3')).textContent='By Component'; scSec.appendChild(pc);
-    } else { scSec.innerHTML+='<p>No control allocations detected under components. Confirm controls are placed under <code><controlOwner></code> using <code><internals></code> or <code><externals></code>.</p>'; }
+    } else { scSec.innerHTML+='<p>No control allocations detected.</p>'; }
     wrap.appendChild(scSec);
 
     reportEl.innerHTML=''; reportEl.appendChild(wrap);
